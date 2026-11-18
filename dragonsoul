@@ -1,0 +1,213 @@
+-- Clean up old instances, UI, and loops if the script is re-executed
+if getgenv().DragonBallESP_Cleanup then
+    pcall(getgenv().DragonBallESP_Cleanup)
+end
+
+-- Services
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+
+local localPlayer = Players.LocalPlayer
+
+-- Determine safe UI parent
+local uiParent = (gethui and gethui()) or CoreGui or localPlayer:WaitForChild("PlayerGui")
+
+-- Remove lingering instances
+for _, gui in ipairs(uiParent:GetChildren()) do
+    if gui.Name == "DragonBallESP_Folder" or gui.Name == "WindUI" then
+        gui:Destroy()
+    end
+end
+
+-- Create a dedicated folder for ESP Billboards
+local espFolder = Instance.new("Folder")
+espFolder.Name = "DragonBallESP_Folder"
+espFolder.Parent = uiParent
+
+-- Load WindUI Library
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+-- State & Tracking
+local espEnabled = true
+local trackedObjects = {}
+local connections = {}
+
+-- Create WindUI Window
+local Window = WindUI:CreateWindow({
+    Title = "DragonBall ESP",
+    Icon = "eye",
+    Author = "ESP Menu",
+    Folder = "DragonBallESP",
+    Size = UDim2.fromOffset(460, 300),
+    Transparent = true,
+    Theme = "Dark",
+})
+
+-- Set Menu Keybind to N
+Window:SetToggleKey(Enum.KeyCode.N)
+
+-- Create Main Tab
+local MainTab = Window:Tab({
+    Title = "ESP Settings",
+    Icon = "radar",
+})
+
+-- Strict validation check to ensure it's a real physical object and not a script/UI/player
+local function isValidDragonBall(obj)
+    -- Must be a Model or BasePart
+    if not obj:IsA("Model") and not obj:IsA("BasePart") then return false end
+    
+    -- Ignore players or character models completely
+    if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
+        return false
+    end
+
+    -- Check if name closely matches DragonBall (case-insensitive, exact word match or specific prefix)
+    local lowerName = obj.Name:lower()
+    if not lowerName:find("dragonball") and not lowerName:find("dragon ball") then
+        return false
+    end
+
+    return true
+end
+
+-- Helper to get a valid BasePart anchor
+local function getTargetPart(obj)
+    if obj:IsA("BasePart") then
+        return obj
+    elseif obj:IsA("Model") then
+        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return nil
+end
+
+-- ESP Creation Function
+local function createESP(targetObj)
+    if trackedObjects[targetObj] then return end
+    if not isValidDragonBall(targetObj) then return end
+
+    local targetPart = getTargetPart(targetObj)
+    if not targetPart then return end
+
+    -- Create BillboardGui
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "DragonBallESP_Tag"
+    billboard.Size = UDim2.new(0, 140, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = espEnabled
+    billboard.Adornee = targetPart
+    billboard.Parent = espFolder
+
+    -- Orange Text Label
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = "Dragon Ball"
+    textLabel.TextColor3 = Color3.fromRGB(255, 140, 0)
+    textLabel.TextStrokeTransparency = 0.3
+    textLabel.TextSize = 14
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.Parent = billboard
+
+    trackedObjects[targetObj] = {
+        Billboard = billboard,
+        TextLabel = textLabel,
+        TargetPart = targetPart
+    }
+end
+
+-- Scan Workspace for valid DragonBalls
+local function scanWorkspace()
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if isValidDragonBall(obj) then
+            createESP(obj)
+        end
+    end
+end
+
+-- Toggle Visibility & Rescan
+local function setESPState(state)
+    espEnabled = state
+    if espEnabled then
+        scanWorkspace()
+    end
+    for _, data in pairs(trackedObjects) do
+        if data.Billboard then
+            data.Billboard.Enabled = espEnabled
+        end
+    end
+end
+
+-- Add Toggle to WindUI
+MainTab:Toggle({
+    Title = "Enable DragonBall ESP",
+    Desc = "Shows orange text with name and distance through walls",
+    Value = true,
+    Callback = function(state)
+        setESPState(state)
+    end
+})
+
+-- Update distances and clean up disappeared objects every frame
+local renderConn = RunService.RenderStepped:Connect(function()
+    local character = localPlayer.Character
+    local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
+    local originPos = root and root.Position
+
+    for obj, data in pairs(trackedObjects) do
+        -- Remove ESP immediately if the object was destroyed, collected, or moved out of Workspace
+        if not obj or not obj.Parent or not obj:IsDescendantOf(Workspace) then
+            if data.Billboard then
+                data.Billboard:Destroy()
+            end
+            trackedObjects[obj] = nil
+        else
+            -- Re-verify target part
+            if not data.TargetPart or not data.TargetPart.Parent then
+                data.TargetPart = getTargetPart(obj)
+                if data.TargetPart then
+                    data.Billboard.Adornee = data.TargetPart
+                end
+            end
+
+            data.Billboard.Enabled = espEnabled
+
+            if espEnabled and originPos and data.TargetPart then
+                local distance = (data.TargetPart.Position - originPos).Magnitude
+                data.TextLabel.Text = string.format("Dragon Ball\n[%d studs]", math.floor(distance))
+            end
+        end
+    end
+end)
+table.insert(connections, renderConn)
+
+-- Listen for newly spawned DragonBalls
+local addedConn = Workspace.DescendantAdded:Connect(function(obj)
+    task.wait(0.2) -- Brief yield for properties/parts to fully load
+    if isValidDragonBall(obj) then
+        createESP(obj)
+    end
+end)
+table.insert(connections, addedConn)
+
+-- Register global cleanup function
+getgenv().DragonBallESP_Cleanup = function()
+    for _, conn in ipairs(connections) do
+        if conn.Connected then
+            conn:Disconnect()
+        end
+    end
+    if espFolder then
+        espFolder:Destroy()
+    end
+    if Window and Window.Destroy then
+        pcall(function() Window:Destroy() end)
+    end
+    table.clear(trackedObjects)
+end
+
+-- Initial scan
+scanWorkspace()
