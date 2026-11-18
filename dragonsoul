@@ -1,6 +1,6 @@
--- Clean up old instances, UI, and loops if the script is re-executed
-if getgenv().DragonBallESP_Cleanup then
-    pcall(getgenv().DragonBallESP_Cleanup)
+-- Clean up old instances, UI, and loops if re-executed
+if getgenv().DragonSoulScript_Cleanup then
+    pcall(getgenv().DragonSoulScript_Cleanup)
 end
 
 -- Services
@@ -16,31 +16,48 @@ local uiParent = (gethui and gethui()) or CoreGui or localPlayer:WaitForChild("P
 
 -- Remove lingering instances
 for _, gui in ipairs(uiParent:GetChildren()) do
-    if gui.Name == "DragonBallESP_Folder" or gui.Name == "WindUI" then
+    if gui.Name == "DragonSoul_Folder" or gui.Name == "WindUI" then
         gui:Destroy()
     end
 end
 
--- Create a dedicated folder for ESP Billboards
-local espFolder = Instance.new("Folder")
-espFolder.Name = "DragonBallESP_Folder"
-espFolder.Parent = uiParent
+-- Create dedicated folder for ESP & Map Markers
+local visualFolder = Instance.new("Folder")
+visualFolder.Name = "DragonSoul_Folder"
+visualFolder.Parent = uiParent
 
 -- Load WindUI Library
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
+-- ==========================================
+-- SAVED MAP LOCATIONS
+-- ==========================================
+local MapLocations = {
+    { Name = "Great Plains", Position = Vector3.new(-1085, 397, -6272) },
+    { Name = "City", Position = Vector3.new(-2927, 603, -5208) },
+    { Name = "Ape", Position = Vector3.new(-345, 398, -10360) },
+    { Name = "Power Tower", Position = Vector3.new(-7455, 390, 522) },
+    { Name = "Frozen Village", Position = Vector3.new(-10189, 406, 3657) },
+    { Name = "East City", Position = Vector3.new(-2859, 648, 3448) },
+    { Name = "Galactic", Position = Vector3.new(-4266, 507, -630) },
+    { Name = "Jungle", Position = Vector3.new(-1475, 449, -2807) },
+    { Name = "Red Ribbon", Position = Vector3.new(1554, 509, -3071) },
+    { Name = "North Pole", Position = Vector3.new(-11704, 416, 10178) },
+}
+
 -- State & Tracking
 local espEnabled = true
-local trackedObjects = {}
+local trackedBalls = {}     -- [obj] = { Billboard, TextLabel, TargetPart, Position }
+local activeMapMarkers = {} -- [mapIndex] = { Part, Billboard, TextLabel }
 local connections = {}
 
 -- Create WindUI Window
 local Window = WindUI:CreateWindow({
-    Title = "DragonBall ESP",
-    Icon = "eye",
-    Author = "ESP Menu",
-    Folder = "DragonBallESP",
-    Size = UDim2.fromOffset(460, 300),
+    Title = "Dragon Soul",
+    Icon = "flame",
+    Author = "Script Menu",
+    Folder = "DragonSoulScript",
+    Size = UDim2.fromOffset(460, 280),
     Transparent = true,
     Theme = "Dark",
 })
@@ -49,31 +66,104 @@ local Window = WindUI:CreateWindow({
 Window:SetToggleKey(Enum.KeyCode.N)
 
 -- Create Main Tab
-local MainTab = Window:Tab({
-    Title = "ESP Settings",
-    Icon = "radar",
+local EspTab = Window:Tab({
+    Title = "DragonBall ESP",
+    Icon = "eye",
 })
 
--- Strict validation check to ensure it's a real physical object and not a script/UI/player
+-- Helper to find the nearest map to a 3D position
+local function getNearestMap(position)
+    local closestIndex = nil
+    local shortestDist = math.huge
+
+    for index, mapData in ipairs(MapLocations) do
+        local dist = (position - mapData.Position).Magnitude
+        if dist < shortestDist then
+            shortestDist = dist
+            closestIndex = index
+        end
+    end
+
+    return closestIndex, MapLocations[closestIndex]
+end
+
+-- Create a dynamic map marker instantly when a ball spawns near it
+local function getOrCreateMapMarker(mapIndex)
+    if activeMapMarkers[mapIndex] then
+        return activeMapMarkers[mapIndex]
+    end
+
+    local mapData = MapLocations[mapIndex]
+    if not mapData then return nil end
+
+    local anchorPart = Instance.new("Part")
+    anchorPart.Name = "ActiveMapAnchor_" .. mapData.Name
+    anchorPart.Size = Vector3.new(1, 1, 1)
+    anchorPart.Position = mapData.Position + Vector3.new(0, 60, 0)
+    anchorPart.Anchored = true
+    anchorPart.CanCollide = false
+    anchorPart.Transparency = 1
+    anchorPart.Parent = visualFolder
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "ActiveMapESP_" .. mapData.Name
+    billboard.Size = UDim2.new(0, 170, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 25, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = espEnabled
+    billboard.Adornee = anchorPart
+    billboard.Parent = visualFolder
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = "📍 " .. mapData.Name
+    textLabel.TextColor3 = Color3.fromRGB(0, 210, 255)
+    textLabel.TextStrokeTransparency = 0.3
+    textLabel.TextSize = 14
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.Parent = billboard
+
+    local marker = {
+        Name = mapData.Name,
+        Position = mapData.Position,
+        Part = anchorPart,
+        Billboard = billboard,
+        TextLabel = textLabel
+    }
+    activeMapMarkers[mapIndex] = marker
+    return marker
+end
+
+-- Completely destroy a map marker when no Dragon Balls are near it
+local function destroyMapMarker(mapIndex)
+    local marker = activeMapMarkers[mapIndex]
+    if marker then
+        if marker.Billboard then marker.Billboard:Destroy() end
+        if marker.Part then marker.Part:Destroy() end
+        activeMapMarkers[mapIndex] = nil
+    end
+end
+
+local function destroyAllMapMarkers()
+    for mapIndex in pairs(activeMapMarkers) do
+        destroyMapMarker(mapIndex)
+    end
+end
+
+-- Strict validation for DragonBall objects
 local function isValidDragonBall(obj)
-    -- Must be a Model or BasePart
+    if not obj or not obj.Parent then return false end
+    if not obj:IsDescendantOf(Workspace) then return false end
     if not obj:IsA("Model") and not obj:IsA("BasePart") then return false end
-    
-    -- Ignore players or character models completely
     if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
         return false
     end
 
-    -- Check if name closely matches DragonBall (case-insensitive, exact word match or specific prefix)
     local lowerName = obj.Name:lower()
-    if not lowerName:find("dragonball") and not lowerName:find("dragon ball") then
-        return false
-    end
-
-    return true
+    return lowerName:find("dragonball") ~= nil or lowerName:find("dragon ball") ~= nil
 end
 
--- Helper to get a valid BasePart anchor
 local function getTargetPart(obj)
     if obj:IsA("BasePart") then
         return obj
@@ -83,25 +173,31 @@ local function getTargetPart(obj)
     return nil
 end
 
--- ESP Creation Function
 local function createESP(targetObj)
-    if trackedObjects[targetObj] then return end
+    if trackedBalls[targetObj] then return end
     if not isValidDragonBall(targetObj) then return end
 
     local targetPart = getTargetPart(targetObj)
-    if not targetPart then return end
+    if not targetPart or targetPart.Position.Magnitude < 1 then return end
 
-    -- Create BillboardGui
+    local newPos = targetPart.Position
+
+    -- STRICT POSITION DE-DUPLICATION: If an ESP already exists within 8 studs, ignore this extra part completely
+    for _, existingData in pairs(trackedBalls) do
+        if existingData.TargetPart and (existingData.TargetPart.Position - newPos).Magnitude < 8 then
+            return 
+        end
+    end
+
     local billboard = Instance.new("BillboardGui")
-    billboard.Name = "DragonBallESP_Tag"
-    billboard.Size = UDim2.new(0, 140, 0, 50)
-    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.Name = "DragonBall_Tag"
+    billboard.Size = UDim2.new(0, 140, 0, 45)
+    billboard.StudsOffset = Vector3.new(0, 2, 0)
     billboard.AlwaysOnTop = true
     billboard.Enabled = espEnabled
     billboard.Adornee = targetPart
-    billboard.Parent = espFolder
+    billboard.Parent = visualFolder
 
-    -- Orange Text Label
     local textLabel = Instance.new("TextLabel")
     textLabel.Size = UDim2.new(1, 0, 1, 0)
     textLabel.BackgroundTransparency = 1
@@ -112,14 +208,19 @@ local function createESP(targetObj)
     textLabel.Font = Enum.Font.GothamBold
     textLabel.Parent = billboard
 
-    trackedObjects[targetObj] = {
+    trackedBalls[targetObj] = {
         Billboard = billboard,
         TextLabel = textLabel,
         TargetPart = targetPart
     }
+
+    -- INSTANT ACTIVATION: Turn on nearest map marker
+    local mapIndex = getNearestMap(newPos)
+    if mapIndex then
+        getOrCreateMapMarker(mapIndex)
+    end
 end
 
--- Scan Workspace for valid DragonBalls
 local function scanWorkspace()
     for _, obj in ipairs(Workspace:GetDescendants()) do
         if isValidDragonBall(obj) then
@@ -128,86 +229,107 @@ local function scanWorkspace()
     end
 end
 
--- Toggle Visibility & Rescan
-local function setESPState(state)
-    espEnabled = state
-    if espEnabled then
-        scanWorkspace()
-    end
-    for _, data in pairs(trackedObjects) do
-        if data.Billboard then
-            data.Billboard.Enabled = espEnabled
-        end
-    end
-end
-
--- Add Toggle to WindUI
-MainTab:Toggle({
-    Title = "Enable DragonBall ESP",
-    Desc = "Shows orange text with name and distance through walls",
+-- Toggle Control
+EspTab:Toggle({
+    Title = "Enable DragonBall & Nearest Map ESP",
+    Desc = "Instantly activates map ESP when a Dragon Ball spawns nearby",
     Value = true,
     Callback = function(state)
-        setESPState(state)
+        espEnabled = state
+        if espEnabled then
+            scanWorkspace()
+        else
+            destroyAllMapMarkers()
+        end
+
+        for _, data in pairs(trackedBalls) do
+            if data.Billboard then data.Billboard.Enabled = espEnabled end
+        end
     end
 })
 
--- Update distances and clean up disappeared objects every frame
+-- Frame Update Loop
 local renderConn = RunService.RenderStepped:Connect(function()
     local character = localPlayer.Character
     local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
     local originPos = root and root.Position
 
-    for obj, data in pairs(trackedObjects) do
-        -- Remove ESP immediately if the object was destroyed, collected, or moved out of Workspace
-        if not obj or not obj.Parent or not obj:IsDescendantOf(Workspace) then
-            if data.Billboard then
-                data.Billboard:Destroy()
-            end
-            trackedObjects[obj] = nil
+    local neededMapCounts = {}
+
+    for obj, data in pairs(trackedBalls) do
+        if not isValidDragonBall(obj) then
+            if data.Billboard then data.Billboard:Destroy() end
+            trackedBalls[obj] = nil
         else
-            -- Re-verify target part
             if not data.TargetPart or not data.TargetPart.Parent then
                 data.TargetPart = getTargetPart(obj)
-                if data.TargetPart then
-                    data.Billboard.Adornee = data.TargetPart
-                end
+                if data.TargetPart then data.Billboard.Adornee = data.TargetPart end
             end
 
-            data.Billboard.Enabled = espEnabled
+            local targetPart = data.TargetPart
+            if targetPart and targetPart:IsDescendantOf(Workspace) and targetPart.Position.Magnitude >= 1 then
+                data.Billboard.Enabled = espEnabled
 
-            if espEnabled and originPos and data.TargetPart then
-                local distance = (data.TargetPart.Position - originPos).Magnitude
-                data.TextLabel.Text = string.format("Dragon Ball\n[%d studs]", math.floor(distance))
+                if espEnabled then
+                    local ballPos = targetPart.Position
+                    local nearestIndex = getNearestMap(ballPos)
+
+                    if nearestIndex then
+                        neededMapCounts[nearestIndex] = (neededMapCounts[nearestIndex] or 0) + 1
+                    end
+
+                    local distToPlayer = originPos and math.floor((ballPos - originPos).Magnitude) or 0
+                    data.TextLabel.Text = string.format("Dragon Ball\n[%d studs]", distToPlayer)
+                end
+            else
+                data.Billboard.Enabled = false
             end
         end
+    end
+
+    -- Keep active map markers updated or destroy them instantly if the ball is gone
+    if espEnabled then
+        for mapIndex, count in pairs(neededMapCounts) do
+            local marker = getOrCreateMapMarker(mapIndex)
+            if marker then
+                marker.Billboard.Enabled = true
+                local distToMap = originPos and math.floor((marker.Position - originPos).Magnitude) or 0
+                marker.TextLabel.Text = string.format("📍 %s (%d DB)\n[%d studs]", marker.Name, count, distToMap)
+            end
+        end
+
+        for mapIndex in pairs(activeMapMarkers) do
+            if not neededMapCounts[mapIndex] then
+                destroyMapMarker(mapIndex)
+            end
+        end
+    else
+        destroyAllMapMarkers()
     end
 end)
 table.insert(connections, renderConn)
 
--- Listen for newly spawned DragonBalls
+-- Detect newly spawned DragonBalls instantly
 local addedConn = Workspace.DescendantAdded:Connect(function(obj)
-    task.wait(0.2) -- Brief yield for properties/parts to fully load
+    task.wait(0.2)
     if isValidDragonBall(obj) then
         createESP(obj)
     end
 end)
 table.insert(connections, addedConn)
 
--- Register global cleanup function
-getgenv().DragonBallESP_Cleanup = function()
+-- Global Cleanup Function
+getgenv().DragonSoulScript_Cleanup = function()
     for _, conn in ipairs(connections) do
-        if conn.Connected then
-            conn:Disconnect()
-        end
+        if conn.Connected then conn:Disconnect() end
     end
-    if espFolder then
-        espFolder:Destroy()
-    end
+    destroyAllMapMarkers()
+    if visualFolder then visualFolder:Destroy() end
     if Window and Window.Destroy then
         pcall(function() Window:Destroy() end)
     end
-    table.clear(trackedObjects)
+    table.clear(trackedBalls)
 end
 
--- Initial scan
+-- Initial Scan
 scanWorkspace()
