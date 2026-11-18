@@ -117,7 +117,7 @@ local function getOrCreateMapMarker(mapIndex)
     local textLabel = Instance.new("TextLabel")
     textLabel.Size = UDim2.new(1, 0, 1, 0)
     textLabel.BackgroundTransparency = 1
-    textLabel.Text = "📍 " .. mapData.Name
+    textLabel.Text = mapData.Name -- Pin emoji removed here
     textLabel.TextColor3 = Color3.fromRGB(0, 210, 255)
     textLabel.TextStrokeTransparency = 0.3
     textLabel.TextSize = 14
@@ -294,7 +294,7 @@ local renderConn = RunService.RenderStepped:Connect(function()
             if marker then
                 marker.Billboard.Enabled = true
                 local distToMap = originPos and math.floor((marker.Position - originPos).Magnitude) or 0
-                marker.TextLabel.Text = string.format("📍 %s (%d DB)\n[%d studs]", marker.Name, count, distToMap)
+                marker.TextLabel.Text = string.format("%s (%d DB)\n[%d studs]", marker.Name, count, distToMap)
             end
         end
 
