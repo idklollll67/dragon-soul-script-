@@ -45,11 +45,15 @@ local MapLocations = {
     { Name = "North Pole", Position = Vector3.new(-11704, 416, 10178) },
 }
 
+local MAX_MAP_SNAP_DISTANCE = 2500 -- Prevents far-away lobby/ocean props from snapping to "City"
+
 -- State & Tracking
 local espEnabled = true
 local ignoreStaticProps = true
-local trackedBalls = {}     -- [obj] = { Billboard, TextLabel, TargetPart }
-local activeMapMarkers = {} -- [mapIndex] = { Part, Billboard, TextLabel }
+local trackedBalls = {}         -- [obj] = { Billboard, TextLabel, TargetPart }
+local activeMapMarkers = {}     -- [mapIndex] = { Part, Billboard, TextLabel }
+local blacklistedInstances = {} -- [obj] = true
+local blacklistedPositions = {} -- { { Pos = Vector3, Radius = number }, ... }
 local connections = {}
 
 -- Create WindUI Window
@@ -58,7 +62,7 @@ local Window = WindUI:CreateWindow({
     Icon = "flame",
     Author = "Script Menu",
     Folder = "DragonSoulScript",
-    Size = UDim2.fromOffset(460, 310),
+    Size = UDim2.fromOffset(470, 360),
     Transparent = true,
     Theme = "Dark",
 })
@@ -72,20 +76,26 @@ local EspTab = Window:Tab({
     Icon = "eye",
 })
 
--- Helper to find the nearest map to a 3D position
+-- Live status display inside UI
+local StatusParagraph = EspTab:Paragraph({
+    Title = "Active Detection Status",
+    Desc = "Scanning workspace..."
+})
+
+-- Helper to find the nearest map within valid range
 local function getNearestMap(position)
     local closestIndex = nil
     local shortestDist = math.huge
 
     for index, mapData in ipairs(MapLocations) do
         local dist = (position - mapData.Position).Magnitude
-        if dist < shortestDist then
+        if dist < shortestDist and dist <= MAX_MAP_SNAP_DISTANCE then
             shortestDist = dist
             closestIndex = index
         end
     end
 
-    return closestIndex, MapLocations[closestIndex]
+    return closestIndex, closestIndex and MapLocations[closestIndex] or nil
 end
 
 -- Create a dynamic map marker instantly when a ball spawns near it
@@ -136,7 +146,6 @@ local function getOrCreateMapMarker(mapIndex)
     return marker
 end
 
--- Completely destroy a map marker when no Dragon Balls are near it
 local function destroyMapMarker(mapIndex)
     local marker = activeMapMarkers[mapIndex]
     if marker then
@@ -161,38 +170,54 @@ local function getTargetPart(obj)
     return nil
 end
 
--- Checks if the object actually behaves like a collectable Dragon Ball rather than a static map decoration
-local function hasPickupInteraction(obj)
-    -- Check inside the object itself
-    if obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-        or obj:FindFirstChildWhichIsA("ClickDetector", true)
-        or obj:FindFirstChildWhichIsA("TouchTransmitter", true) then
-        return true
-    end
+-- Filters out static map props, Shenron altars, lobby displays, and quest objects
+local function isStaticMapOrQuestProp(obj)
+    local fullPath = obj:GetFullName():lower()
+    local blockedKeywords = {
+        "quest", "npc", "shop", "deco", "decoration", "prop",
+        "building", "capsule", "radar", "display", "fake", "statue", "pedestal",
+        "shenron", "altar", "shrine", "lobby", "spawn", "terrain", "world", "map",
+        "assets", "architecture", "structures", "effects", "vfx"
+    }
 
-    -- Check immediate parent (in case the mesh part is inside a container with the prompt)
-    local parent = obj.Parent
-    if parent and parent ~= Workspace then
-        if parent:FindFirstChildWhichIsA("ProximityPrompt", true)
-            or parent:FindFirstChildWhichIsA("ClickDetector", true)
-            or parent:FindFirstChildWhichIsA("TouchTransmitter", true) then
-            return true
+    -- Allow if inside an explicit DragonBall/Drop/Item spawn folder
+    local isExplicitSpawnFolder = fullPath:find("dragonballspawns", 1, true)
+        or fullPath:find("dragonballs", 1, true)
+        or fullPath:find("itemspawns", 1, true)
+        or fullPath:find("drops", 1, true)
+
+    if not isExplicitSpawnFolder then
+        for _, word in ipairs(blockedKeywords) do
+            if fullPath:find(word, 1, true) then
+                return true
+            end
         end
     end
 
-    return false
+    -- Must have a pickup trigger (ProximityPrompt, ClickDetector, or TouchTransmitter)
+    local hasTrigger = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+        or obj:FindFirstChildWhichIsA("ClickDetector", true)
+        or obj:FindFirstChildWhichIsA("TouchTransmitter", true)
+
+    if not hasTrigger and obj.Parent and obj.Parent ~= Workspace then
+        hasTrigger = obj.Parent:FindFirstChildWhichIsA("ProximityPrompt", true)
+            or obj.Parent:FindFirstChildWhichIsA("ClickDetector", true)
+            or obj.Parent:FindFirstChildWhichIsA("TouchTransmitter", true)
+    end
+
+    return not hasTrigger
 end
 
 -- Strict validation for REAL spawned DragonBall objects
 local function isValidDragonBall(obj)
     if not obj or not obj.Parent then return false end
+    if blacklistedInstances[obj] then return false end
     if not obj:IsDescendantOf(Workspace) then return false end
     if not obj:IsA("Model") and not obj:IsA("BasePart") then return false end
     if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
         return false
     end
 
-    -- Ignore equipped tools or items inside NPCs/Characters
     if obj:FindFirstAncestorOfClass("Tool") or obj:FindFirstAncestorOfClass("Accessory") then
         return false
     end
@@ -211,12 +236,16 @@ local function isValidDragonBall(obj)
         return false
     end
 
-    -- Filter out permanent scenery/decoration props (like the fake one in East City)
-    if ignoreStaticProps then
-        -- Must be interactable/collectable (ProximityPrompt, ClickDetector, or TouchInterest)
-        if not hasPickupInteraction(obj) then
+    -- Check user-blacklisted coordinates
+    local pos = targetPart.Position
+    for _, zone in ipairs(blacklistedPositions) do
+        if (pos - zone.Pos).Magnitude < zone.Radius then
             return false
         end
+    end
+
+    if ignoreStaticProps and isStaticMapOrQuestProp(obj) then
+        return false
     end
 
     return true
@@ -231,10 +260,10 @@ local function createESP(targetObj)
 
     local newPos = targetPart.Position
 
-    -- STRICT POSITION DE-DUPLICATION: If an ESP already exists within 8 studs, ignore this extra part completely
+    -- Position de-duplication (< 8 studs)
     for _, existingData in pairs(trackedBalls) do
         if existingData.TargetPart and (existingData.TargetPart.Position - newPos).Magnitude < 8 then
-            return 
+            return
         end
     end
 
@@ -263,7 +292,6 @@ local function createESP(targetObj)
         TargetPart = targetPart
     }
 
-    -- INSTANT ACTIVATION: Turn on nearest map marker
     local mapIndex = getNearestMap(newPos)
     if mapIndex then
         getOrCreateMapMarker(mapIndex)
@@ -271,7 +299,7 @@ local function createESP(targetObj)
 end
 
 local function clearTrackedBalls()
-    for obj, data in pairs(trackedBalls) do
+    for _, data in pairs(trackedBalls) do
         if data.Billboard then data.Billboard:Destroy() end
     end
     table.clear(trackedBalls)
@@ -286,10 +314,10 @@ local function scanWorkspace()
     end
 end
 
--- Toggle Control
+-- Toggle Controls
 EspTab:Toggle({
     Title = "Enable DragonBall & Nearest Map ESP",
-    Desc = "Instantly activates map ESP when a real Dragon Ball spawns nearby",
+    Desc = "Activates map ESP when a real Dragon Ball spawns nearby",
     Value = true,
     Callback = function(state)
         espEnabled = state
@@ -306,8 +334,8 @@ EspTab:Toggle({
 })
 
 EspTab:Toggle({
-    Title = "Ignore Fake / Scenery Dragon Balls",
-    Desc = "Filters out non-collectable map props (fixes permanent East City false positive)",
+    Title = "Auto-Filter Map / Quest / Altar Props",
+    Desc = "Ignores static Dragon Ball models inside map/world folders",
     Value = true,
     Callback = function(state)
         ignoreStaticProps = state
@@ -318,13 +346,33 @@ EspTab:Toggle({
     end
 })
 
+-- Manual 1-click Blacklist for stubborn static props
+EspTab:Button({
+    Title = "Blacklist Current False Ball",
+    Desc = "Permanently ignores whatever object is currently triggering the ESP",
+    Callback = function()
+        for obj, data in pairs(trackedBalls) do
+            blacklistedInstances[obj] = true
+            if data.TargetPart then
+                table.insert(blacklistedPositions, { Pos = data.TargetPart.Position, Radius = 30 })
+            end
+        end
+        clearTrackedBalls()
+        if espEnabled then
+            scanWorkspace()
+        end
+    end
+})
+
 -- Frame Update Loop
+local lastStatusText = ""
 local renderConn = RunService.RenderStepped:Connect(function()
     local character = localPlayer.Character
     local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
     local originPos = root and root.Position
 
     local neededMapCounts = {}
+    local statusLines = {}
 
     for obj, data in pairs(trackedBalls) do
         if not isValidDragonBall(obj) then
@@ -342,7 +390,7 @@ local renderConn = RunService.RenderStepped:Connect(function()
 
                 if espEnabled then
                     local ballPos = targetPart.Position
-                    local nearestIndex = getNearestMap(ballPos)
+                    local nearestIndex, nearestMap = getNearestMap(ballPos)
 
                     if nearestIndex then
                         neededMapCounts[nearestIndex] = (neededMapCounts[nearestIndex] or 0) + 1
@@ -350,6 +398,17 @@ local renderConn = RunService.RenderStepped:Connect(function()
 
                     local distToPlayer = originPos and math.floor((ballPos - originPos).Magnitude) or 0
                     data.TextLabel.Text = string.format("Dragon Ball\n[%d studs]", distToPlayer)
+
+                    local parentName = obj.Parent and obj.Parent.Name or "Workspace"
+                    table.insert(statusLines, string.format(
+                        "• %s (in %s) near %s [%d, %d, %d]",
+                        obj.Name,
+                        parentName,
+                        nearestMap and nearestMap.Name or "Out of Range",
+                        math.floor(ballPos.X),
+                        math.floor(ballPos.Y),
+                        math.floor(ballPos.Z)
+                    ))
                 end
             else
                 data.Billboard.Enabled = false
@@ -357,7 +416,14 @@ local renderConn = RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- Keep active map markers updated or destroy them instantly if the ball is gone
+    local newStatusText = (#statusLines > 0) and table.concat(statusLines, "\n") or "No active Dragon Balls detected."
+    if newStatusText ~= lastStatusText then
+        lastStatusText = newStatusText
+        pcall(function()
+            StatusParagraph:SetDesc(newStatusText)
+        end)
+    end
+
     if espEnabled then
         for mapIndex, count in pairs(neededMapCounts) do
             local marker = getOrCreateMapMarker(mapIndex)
