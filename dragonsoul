@@ -32,7 +32,7 @@ visualFolder.Parent = uiParent
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
 -- ==========================================
--- SAVED MAP LOCATIONS
+-- SAVED MAP / ISLAND LOCATIONS
 -- ==========================================
 local MapLocations = {
     { Name = "Great Plains", Position = Vector3.new(-1085, 397, -6272) },
@@ -47,12 +47,22 @@ local MapLocations = {
     { Name = "North Pole", Position = Vector3.new(-11704, 416, 10178) },
 }
 
+-- Build island name list and default selection table for Lootboxes
+local IslandNames = {}
+local selectedLootboxIslands = {}
+for _, mapData in ipairs(MapLocations) do
+    table.insert(IslandNames, mapData.Name)
+    selectedLootboxIslands[mapData.Name] = true
+end
+
 local MAX_MAP_SNAP_DISTANCE = 2500
 
 -- State & Tracking
 local espEnabled = true
+local lootboxEspEnabled = false
 local ignoreStaticProps = true
 local trackedBalls = {}         -- [obj] = { Billboard, TextLabel, TargetPart }
+local trackedLootboxes = {}     -- [obj] = { Billboard, TextLabel, TargetPart }
 local activeMapMarkers = {}     -- [mapIndex] = { Part, Billboard, TextLabel }
 local blacklistedInstances = {} -- [obj] = true
 local blacklistedPositions = {} -- { { Pos = Vector3, Radius = number }, ... }
@@ -85,7 +95,7 @@ local Window = WindUI:CreateWindow({
     Icon = "flame",
     Author = "Script Menu",
     Folder = "DragonSoulScript",
-    Size = UDim2.fromOffset(470, 360),
+    Size = UDim2.fromOffset(470, 390),
     Transparent = true,
     Theme = "Dark",
 })
@@ -94,10 +104,10 @@ local Window = WindUI:CreateWindow({
 Window:SetToggleKey(Enum.KeyCode.N)
 
 -- ==========================================
--- TAB 1: DRAGONBALL ESP
+-- TAB 1: ESP (DRAGON BALLS)
 -- ==========================================
 local EspTab = Window:Tab({
-    Title = "DragonBall ESP",
+    Title = "ESP",
     Icon = "eye",
 })
 
@@ -107,7 +117,20 @@ local StatusParagraph = EspTab:Paragraph({
 })
 
 -- ==========================================
--- TAB 2: SATISFYING (AUDIO)
+-- TAB 2: LOOTBOX (ABOVE SATISFYING)
+-- ==========================================
+local LootboxTab = Window:Tab({
+    Title = "Lootbox",
+    Icon = "package",
+})
+
+local LootboxStatusParagraph = LootboxTab:Paragraph({
+    Title = "Lootbox Tracker",
+    Desc = "Lootbox ESP is disabled."
+})
+
+-- ==========================================
+-- TAB 3: SATISFYING (AUDIO)
 -- ==========================================
 local SatisfyingTab = Window:Tab({
     Title = "Satisfying",
@@ -313,6 +336,34 @@ local function isValidDragonBall(obj)
     return true
 end
 
+local function isValidLootbox(obj)
+    if not obj or not obj.Parent then return false end
+    if not obj:IsDescendantOf(Workspace) then return false end
+    if not obj:IsA("Model") then return false end
+    if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
+        return false
+    end
+
+    if obj.Name:lower():find("lootbox", 1, true) == nil then
+        return false
+    end
+
+    local targetPart = getTargetPart(obj)
+    if not targetPart or targetPart.Position.Magnitude < 1 then
+        return false
+    end
+
+    return true
+end
+
+local function isLootboxIslandAllowed(position)
+    local _, nearestMap = getNearestMap(position)
+    if not nearestMap then
+        return false
+    end
+    return selectedLootboxIslands[nearestMap.Name] == true
+end
+
 local function createESP(targetObj)
     if trackedBalls[targetObj] then return end
     if not isValidDragonBall(targetObj) then return end
@@ -360,6 +411,41 @@ local function createESP(targetObj)
     end
 end
 
+local function createLootboxESP(targetObj)
+    if trackedLootboxes[targetObj] then return end
+    if not isValidLootbox(targetObj) then return end
+
+    local targetPart = getTargetPart(targetObj)
+    if not targetPart then return end
+
+    local allowed = isLootboxIslandAllowed(targetPart.Position)
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "Lootbox_Tag"
+    billboard.Size = UDim2.new(0, 150, 0, 45)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = lootboxEspEnabled and allowed
+    billboard.Adornee = targetPart
+    billboard.Parent = visualFolder
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = "Lootbox"
+    textLabel.TextColor3 = Color3.fromRGB(80, 255, 140)
+    textLabel.TextStrokeTransparency = 0.3
+    textLabel.TextSize = 14
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.Parent = billboard
+
+    trackedLootboxes[targetObj] = {
+        Billboard = billboard,
+        TextLabel = textLabel,
+        TargetPart = targetPart
+    }
+end
+
 local function clearTrackedBalls()
     for _, data in pairs(trackedBalls) do
         if data.Billboard then data.Billboard:Destroy() end
@@ -368,15 +454,27 @@ local function clearTrackedBalls()
     destroyAllMapMarkers()
 end
 
+local function clearTrackedLootboxes()
+    for _, data in pairs(trackedLootboxes) do
+        if data.Billboard then data.Billboard:Destroy() end
+    end
+    table.clear(trackedLootboxes)
+end
+
 local function scanWorkspace()
     for _, obj in ipairs(Workspace:GetDescendants()) do
         if isValidDragonBall(obj) then
             createESP(obj)
         end
+        if lootboxEspEnabled and isValidLootbox(obj) then
+            createLootboxESP(obj)
+        end
     end
 end
 
--- ESP Tab Controls
+-- ==========================================
+-- ESP TAB CONTROLS
+-- ==========================================
 EspTab:Toggle({
     Title = "Enable DragonBall & Nearest Map ESP",
     Desc = "Activates map ESP when a real Dragon Ball spawns nearby",
@@ -425,8 +523,51 @@ EspTab:Button({
     end
 })
 
+-- ==========================================
+-- LOOTBOX TAB CONTROLS
+-- ==========================================
+LootboxTab:Toggle({
+    Title = "Enable Lootbox ESP",
+    Desc = "Highlights Lootbox models on your selected islands",
+    Value = false,
+    Callback = function(state)
+        lootboxEspEnabled = state
+        if lootboxEspEnabled then
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if isValidLootbox(obj) then
+                    createLootboxESP(obj)
+                end
+            end
+        else
+            clearTrackedLootboxes()
+        end
+    end
+})
+
+LootboxTab:Dropdown({
+    Title = "Select Islands to ESP",
+    Desc = "Only lootboxes near the checked islands will be displayed",
+    Values = IslandNames,
+    Value = IslandNames,
+    Multi = true,
+    AllowNone = true,
+    Callback = function(selectedList)
+        table.clear(selectedLootboxIslands)
+        if type(selectedList) == "table" then
+            for k, v in pairs(selectedList) do
+                if type(k) == "number" and type(v) == "string" then
+                    selectedLootboxIslands[v] = true
+                elseif type(k) == "string" and v == true then
+                    selectedLootboxIslands[k] = true
+                end
+            end
+        end
+    end
+})
+
 -- Frame Update Loop
 local lastStatusText = ""
+local lastLootboxStatusText = ""
 local renderConn = RunService.RenderStepped:Connect(function()
     local character = localPlayer.Character
     local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
@@ -477,11 +618,51 @@ local renderConn = RunService.RenderStepped:Connect(function()
         end
     end
 
+    local visibleLootboxCount = 0
+    for obj, data in pairs(trackedLootboxes) do
+        if not lootboxEspEnabled or not isValidLootbox(obj) then
+            if data.Billboard then data.Billboard:Destroy() end
+            trackedLootboxes[obj] = nil
+        else
+            if not data.TargetPart or not data.TargetPart.Parent then
+                data.TargetPart = getTargetPart(obj)
+                if data.TargetPart then data.Billboard.Adornee = data.TargetPart end
+            end
+
+            local targetPart = data.TargetPart
+            if targetPart and targetPart:IsDescendantOf(Workspace) and targetPart.Position.Magnitude >= 1 then
+                local boxPos = targetPart.Position
+                local _, nearestMap = getNearestMap(boxPos)
+                local islandName = nearestMap and nearestMap.Name or nil
+                local allowed = islandName and (selectedLootboxIslands[islandName] == true) or false
+
+                data.Billboard.Enabled = allowed
+                if allowed then
+                    visibleLootboxCount += 1
+                    local distToPlayer = originPos and math.floor((boxPos - originPos).Magnitude) or 0
+                    data.TextLabel.Text = string.format("Lootbox (%s)\n[%d studs]", islandName, distToPlayer)
+                end
+            else
+                data.Billboard.Enabled = false
+            end
+        end
+    end
+
     local newStatusText = (#statusLines > 0) and table.concat(statusLines, "\n") or "No active Dragon Balls detected."
     if newStatusText ~= lastStatusText then
         lastStatusText = newStatusText
         pcall(function()
             StatusParagraph:SetDesc(newStatusText)
+        end)
+    end
+
+    local newLootboxStatusText = lootboxEspEnabled
+        and string.format("Showing %d lootbox(es) on selected islands.", visibleLootboxCount)
+        or "Lootbox ESP is disabled."
+    if newLootboxStatusText ~= lastLootboxStatusText then
+        lastLootboxStatusText = newLootboxStatusText
+        pcall(function()
+            LootboxStatusParagraph:SetDesc(newLootboxStatusText)
         end)
     end
 
@@ -506,11 +687,14 @@ local renderConn = RunService.RenderStepped:Connect(function()
 end)
 table.insert(connections, renderConn)
 
--- Detect newly spawned DragonBalls instantly
+-- Detect newly spawned DragonBalls and Lootboxes instantly
 local addedConn = Workspace.DescendantAdded:Connect(function(obj)
     task.wait(0.25)
     if isValidDragonBall(obj) then
         createESP(obj)
+    end
+    if lootboxEspEnabled and isValidLootbox(obj) then
+        createLootboxESP(obj)
     end
 end)
 table.insert(connections, addedConn)
@@ -521,6 +705,7 @@ getgenv().DragonSoulScript_Cleanup = function()
         if conn.Connected then conn:Disconnect() end
     end
     clearTrackedBalls()
+    clearTrackedLootboxes()
     if visualFolder then visualFolder:Destroy() end
     if Window and Window.Destroy then
         pcall(function() Window:Destroy() end)
