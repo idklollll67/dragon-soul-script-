@@ -8,6 +8,8 @@ local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
+local SoundService = game:GetService("SoundService")
+local UserInputService = game:GetService("UserInputService")
 
 local localPlayer = Players.LocalPlayer
 
@@ -45,7 +47,7 @@ local MapLocations = {
     { Name = "North Pole", Position = Vector3.new(-11704, 416, 10178) },
 }
 
-local MAX_MAP_SNAP_DISTANCE = 2500 -- Prevents far-away lobby/ocean props from snapping to "City"
+local MAX_MAP_SNAP_DISTANCE = 2500
 
 -- State & Tracking
 local espEnabled = true
@@ -55,6 +57,27 @@ local activeMapMarkers = {}     -- [mapIndex] = { Part, Billboard, TextLabel }
 local blacklistedInstances = {} -- [obj] = true
 local blacklistedPositions = {} -- { { Pos = Vector3, Radius = number }, ... }
 local connections = {}
+
+-- Satisfying Audio Settings State
+local soundSettings = {
+    Enabled = true,
+    Volume = 1
+}
+
+-- Function to play the input sound effect
+local function playInputSound()
+    if not soundSettings.Enabled then return end
+    pcall(function()
+        local sound = Instance.new("Sound")
+        sound.SoundId = "rbxassetid://113108830240353"
+        sound.Volume = soundSettings.Volume
+        sound.Parent = SoundService
+        sound:Play()
+        sound.Ended:Connect(function()
+            sound:Destroy()
+        end)
+    end)
+end
 
 -- Create WindUI Window
 local Window = WindUI:CreateWindow({
@@ -70,19 +93,64 @@ local Window = WindUI:CreateWindow({
 -- Set Menu Keybind to N
 Window:SetToggleKey(Enum.KeyCode.N)
 
--- Create Main Tab
+-- ==========================================
+-- TAB 1: DRAGONBALL ESP
+-- ==========================================
 local EspTab = Window:Tab({
     Title = "DragonBall ESP",
     Icon = "eye",
 })
 
--- Live status display inside UI
 local StatusParagraph = EspTab:Paragraph({
     Title = "Active Detection Status",
     Desc = "Scanning workspace..."
 })
 
--- Helper to find the nearest map within valid range
+-- ==========================================
+-- TAB 2: SATISFYING (AUDIO)
+-- ==========================================
+local SatisfyingTab = Window:Tab({
+    Title = "Satisfying",
+    Icon = "sparkles",
+})
+
+SatisfyingTab:Paragraph({
+    Title = "Audio Settings",
+    Desc = "Manage global input sound toggles and volume level."
+})
+
+SatisfyingTab:Toggle({
+    Title = "Enable Input Sound",
+    Desc = "Plays sound effect on every keypress (WASD, etc.) and mouse click",
+    Value = true,
+    Callback = function(state)
+        soundSettings.Enabled = state
+    end
+})
+
+SatisfyingTab:Slider({
+    Title = "Sound Volume",
+    Desc = "Adjust audio volume intensity",
+    Min = 0.1,
+    Max = 5,
+    Default = 1,
+    Step = 0.1,
+    Callback = function(value)
+        soundSettings.Volume = value
+    end
+})
+
+-- Global Keyboard & Mouse Input Listener (tracked for clean disconnect)
+local inputConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.UserInputType == Enum.UserInputType.Keyboard or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        playInputSound()
+    end
+end)
+table.insert(connections, inputConn)
+
+-- ==========================================
+-- ESP & MAP LOGIC
+-- ==========================================
 local function getNearestMap(position)
     local closestIndex = nil
     local shortestDist = math.huge
@@ -98,7 +166,6 @@ local function getNearestMap(position)
     return closestIndex, closestIndex and MapLocations[closestIndex] or nil
 end
 
--- Create a dynamic map marker instantly when a ball spawns near it
 local function getOrCreateMapMarker(mapIndex)
     if activeMapMarkers[mapIndex] then
         return activeMapMarkers[mapIndex]
@@ -170,7 +237,6 @@ local function getTargetPart(obj)
     return nil
 end
 
--- Filters out static map props, Shenron altars, lobby displays, and quest objects
 local function isStaticMapOrQuestProp(obj)
     local fullPath = obj:GetFullName():lower()
     local blockedKeywords = {
@@ -180,7 +246,6 @@ local function isStaticMapOrQuestProp(obj)
         "assets", "architecture", "structures", "effects", "vfx"
     }
 
-    -- Allow if inside an explicit DragonBall/Drop/Item spawn folder
     local isExplicitSpawnFolder = fullPath:find("dragonballspawns", 1, true)
         or fullPath:find("dragonballs", 1, true)
         or fullPath:find("itemspawns", 1, true)
@@ -194,7 +259,6 @@ local function isStaticMapOrQuestProp(obj)
         end
     end
 
-    -- Must have a pickup trigger (ProximityPrompt, ClickDetector, or TouchTransmitter)
     local hasTrigger = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
         or obj:FindFirstChildWhichIsA("ClickDetector", true)
         or obj:FindFirstChildWhichIsA("TouchTransmitter", true)
@@ -208,7 +272,6 @@ local function isStaticMapOrQuestProp(obj)
     return not hasTrigger
 end
 
--- Strict validation for REAL spawned DragonBall objects
 local function isValidDragonBall(obj)
     if not obj or not obj.Parent then return false end
     if blacklistedInstances[obj] then return false end
@@ -236,7 +299,6 @@ local function isValidDragonBall(obj)
         return false
     end
 
-    -- Check user-blacklisted coordinates
     local pos = targetPart.Position
     for _, zone in ipairs(blacklistedPositions) do
         if (pos - zone.Pos).Magnitude < zone.Radius then
@@ -314,7 +376,7 @@ local function scanWorkspace()
     end
 end
 
--- Toggle Controls
+-- ESP Tab Controls
 EspTab:Toggle({
     Title = "Enable DragonBall & Nearest Map ESP",
     Desc = "Activates map ESP when a real Dragon Ball spawns nearby",
@@ -346,7 +408,6 @@ EspTab:Toggle({
     end
 })
 
--- Manual 1-click Blacklist for stubborn static props
 EspTab:Button({
     Title = "Blacklist Current False Ball",
     Desc = "Permanently ignores whatever object is currently triggering the ESP",
