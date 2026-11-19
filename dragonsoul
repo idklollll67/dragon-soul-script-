@@ -47,7 +47,8 @@ local MapLocations = {
 
 -- State & Tracking
 local espEnabled = true
-local trackedBalls = {}     -- [obj] = { Billboard, TextLabel, TargetPart, Position }
+local ignoreStaticProps = true
+local trackedBalls = {}     -- [obj] = { Billboard, TextLabel, TargetPart }
 local activeMapMarkers = {} -- [mapIndex] = { Part, Billboard, TextLabel }
 local connections = {}
 
@@ -57,7 +58,7 @@ local Window = WindUI:CreateWindow({
     Icon = "flame",
     Author = "Script Menu",
     Folder = "DragonSoulScript",
-    Size = UDim2.fromOffset(460, 280),
+    Size = UDim2.fromOffset(460, 310),
     Transparent = true,
     Theme = "Dark",
 })
@@ -117,7 +118,7 @@ local function getOrCreateMapMarker(mapIndex)
     local textLabel = Instance.new("TextLabel")
     textLabel.Size = UDim2.new(1, 0, 1, 0)
     textLabel.BackgroundTransparency = 1
-    textLabel.Text = mapData.Name -- Pin emoji removed here
+    textLabel.Text = mapData.Name
     textLabel.TextColor3 = Color3.fromRGB(0, 210, 255)
     textLabel.TextStrokeTransparency = 0.3
     textLabel.TextSize = 14
@@ -151,19 +152,6 @@ local function destroyAllMapMarkers()
     end
 end
 
--- Strict validation for DragonBall objects
-local function isValidDragonBall(obj)
-    if not obj or not obj.Parent then return false end
-    if not obj:IsDescendantOf(Workspace) then return false end
-    if not obj:IsA("Model") and not obj:IsA("BasePart") then return false end
-    if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
-        return false
-    end
-
-    local lowerName = obj.Name:lower()
-    return lowerName:find("dragonball") ~= nil or lowerName:find("dragon ball") ~= nil
-end
-
 local function getTargetPart(obj)
     if obj:IsA("BasePart") then
         return obj
@@ -173,12 +161,73 @@ local function getTargetPart(obj)
     return nil
 end
 
+-- Checks if the object actually behaves like a collectable Dragon Ball rather than a static map decoration
+local function hasPickupInteraction(obj)
+    -- Check inside the object itself
+    if obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+        or obj:FindFirstChildWhichIsA("ClickDetector", true)
+        or obj:FindFirstChildWhichIsA("TouchTransmitter", true) then
+        return true
+    end
+
+    -- Check immediate parent (in case the mesh part is inside a container with the prompt)
+    local parent = obj.Parent
+    if parent and parent ~= Workspace then
+        if parent:FindFirstChildWhichIsA("ProximityPrompt", true)
+            or parent:FindFirstChildWhichIsA("ClickDetector", true)
+            or parent:FindFirstChildWhichIsA("TouchTransmitter", true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+-- Strict validation for REAL spawned DragonBall objects
+local function isValidDragonBall(obj)
+    if not obj or not obj.Parent then return false end
+    if not obj:IsDescendantOf(Workspace) then return false end
+    if not obj:IsA("Model") and not obj:IsA("BasePart") then return false end
+    if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
+        return false
+    end
+
+    -- Ignore equipped tools or items inside NPCs/Characters
+    if obj:FindFirstAncestorOfClass("Tool") or obj:FindFirstAncestorOfClass("Accessory") then
+        return false
+    end
+    local ancestorModel = obj:FindFirstAncestorOfClass("Model")
+    if ancestorModel and ancestorModel:FindFirstChildOfClass("Humanoid") then
+        return false
+    end
+
+    local lowerName = obj.Name:lower()
+    if lowerName:find("dragonball") == nil and lowerName:find("dragon ball") == nil then
+        return false
+    end
+
+    local targetPart = getTargetPart(obj)
+    if not targetPart or targetPart.Position.Magnitude < 1 then
+        return false
+    end
+
+    -- Filter out permanent scenery/decoration props (like the fake one in East City)
+    if ignoreStaticProps then
+        -- Must be interactable/collectable (ProximityPrompt, ClickDetector, or TouchInterest)
+        if not hasPickupInteraction(obj) then
+            return false
+        end
+    end
+
+    return true
+end
+
 local function createESP(targetObj)
     if trackedBalls[targetObj] then return end
     if not isValidDragonBall(targetObj) then return end
 
     local targetPart = getTargetPart(targetObj)
-    if not targetPart or targetPart.Position.Magnitude < 1 then return end
+    if not targetPart then return end
 
     local newPos = targetPart.Position
 
@@ -221,6 +270,14 @@ local function createESP(targetObj)
     end
 end
 
+local function clearTrackedBalls()
+    for obj, data in pairs(trackedBalls) do
+        if data.Billboard then data.Billboard:Destroy() end
+    end
+    table.clear(trackedBalls)
+    destroyAllMapMarkers()
+end
+
 local function scanWorkspace()
     for _, obj in ipairs(Workspace:GetDescendants()) do
         if isValidDragonBall(obj) then
@@ -232,7 +289,7 @@ end
 -- Toggle Control
 EspTab:Toggle({
     Title = "Enable DragonBall & Nearest Map ESP",
-    Desc = "Instantly activates map ESP when a Dragon Ball spawns nearby",
+    Desc = "Instantly activates map ESP when a real Dragon Ball spawns nearby",
     Value = true,
     Callback = function(state)
         espEnabled = state
@@ -244,6 +301,19 @@ EspTab:Toggle({
 
         for _, data in pairs(trackedBalls) do
             if data.Billboard then data.Billboard.Enabled = espEnabled end
+        end
+    end
+})
+
+EspTab:Toggle({
+    Title = "Ignore Fake / Scenery Dragon Balls",
+    Desc = "Filters out non-collectable map props (fixes permanent East City false positive)",
+    Value = true,
+    Callback = function(state)
+        ignoreStaticProps = state
+        clearTrackedBalls()
+        if espEnabled then
+            scanWorkspace()
         end
     end
 })
@@ -311,7 +381,7 @@ table.insert(connections, renderConn)
 
 -- Detect newly spawned DragonBalls instantly
 local addedConn = Workspace.DescendantAdded:Connect(function(obj)
-    task.wait(0.2)
+    task.wait(0.25)
     if isValidDragonBall(obj) then
         createESP(obj)
     end
@@ -323,12 +393,11 @@ getgenv().DragonSoulScript_Cleanup = function()
     for _, conn in ipairs(connections) do
         if conn.Connected then conn:Disconnect() end
     end
-    destroyAllMapMarkers()
+    clearTrackedBalls()
     if visualFolder then visualFolder:Destroy() end
     if Window and Window.Destroy then
         pcall(function() Window:Destroy() end)
     end
-    table.clear(trackedBalls)
 end
 
 -- Initial Scan
